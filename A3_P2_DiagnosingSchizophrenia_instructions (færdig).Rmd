@@ -1,0 +1,285 @@
+---
+title: "Assignment 3 - Part 2 - Diagnosing Schizophrenia from Voice"
+author: "Sofie Ditmer"
+date: "October 17, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Assignment 3 - Part 2 - Diagnosing schizophrenia from voice
+
+In the previous part of the assignment you generated a bunch of "features", that is, of quantitative descriptors of voice in schizophrenia. We then looked at whether we could replicate results from the previous literature.
+We now want to know whether we can automatically diagnose schizophrenia from voice only, that is, relying on the set of features you produced last time, we will try to produce an automated classifier.
+Again, remember that the dataset containst 7 studies and 3 languages. Feel free to only include Danish (Study 1-4) if you feel that adds too much complexity.
+
+Issues to be discussed in your report:
+- Should you run the analysis on all languages/studies at the same time? 
+- Choose your best acoustic feature from part 1. How well can you diagnose schizophrenia just using it?
+- Identify the best combination of acoustic features to diagnose schizophrenia using logistic regression.
+- Discuss the "classification" process: which methods are you using? Which confounds should you be aware of? What are the strength and limitation of the analysis?
+- Bonus question: Logistic regression is only one of many classification algorithms. Try using others and compare performance. Some examples: Discriminant Function, Random Forest, Support Vector Machine, etc. The package caret provides them. 
+- Bonus Bonus question: It is possible combine the output of multiple  classification models to improve classification accuracy. For inspiration see,
+https://machinelearningmastery.com/machine-learning-ensembles-with-r/
+ The interested reader might also want to look up 'The BigChaos Solution to the Netflix Grand Prize'
+
+## Learning objectives
+- Learn the basics of classification in a machine learning framework
+- Design, fit and report logistic regressions
+- Apply feature selection techniques
+
+### Let's start
+
+We first want to build a logistic regression to see whether you can diagnose schizophrenia from your best acoustic feature. Let's use the full dataset and calculate the different performance measures (accuracy, sensitivity, specificity, PPV, NPV, ROC curve). You need to think carefully as to how we should (or not) use study and subject ID.
+
+Then cross-validate the logistic regression and re-calculate performance on the testing folds. N.B. The cross-validation functions you already have should be tweaked: you need to calculate these new performance measures. Alternatively, the groupdata2 and cvms package created by Ludvig are an easy solution. 
+
+N.B. the predict() function generates log odds (the full scale between minus and plus infinity). Log odds > 0 indicates a choice of 1, below a choice of 0.
+N.N.B. you need to decide whether calculate performance on each single test fold or save all the prediction for test folds in one dataset, so to calculate overall performance.
+N.N.N.B. Now you have two levels of structure: subject and study. Should this impact your cross-validation?
+N.N.N.N.B. A more advanced solution could rely on the tidymodels set of packages (warning: Time-consuming to learn as the documentation is sparse, but totally worth it)
+
+
+```{r}
+library(pacman)
+pacman::p_load(tidyverse, purrr, lme4, lmerTest, DescTools, sjstats, tidymodels, groupdata2)
+p_load("cvms")
+
+#First we read our data from the preivous assignment (part 1)
+acoustic_data <- read.csv("acoustic_features.csv")
+
+#We do not want to run the analysis on all langauges. We only want the Danish data. We use the filter() function to filter away all other languages other than Danish
+danish_data <- filter(acoustic_data, Language == "Danish")
+
+danish_data_subset <- select(danish_data, unique_ID, Diagnosis, scaled_pitch_variability,scaled_proportion_spoken_time, scaled_speech_rate)
+
+danish_data_subset <- na.omit(danish_data_subset)
+
+##BEST MODEL FROM PART 1##
+#Our best model is model number 1, because its hedge's g is most similar to the hedge's g that the meta-analysis found:
+
+#Model 1: g = -0.125, g from meta-analysis = -0.55
+#Model 2: g  = 0.003, g from meta-analysis = -1.26
+#Model 3: g = -0.135, g from meta-analysis = -0.75
+#Model 4: g = 0.183, g from meta-analysis = 1.89
+
+#Here we can see that model 1 performs most similarly to the meta-analysis. Model one uses the feature pitch variability
+
+#Thus, the best model from part 1 is:
+model <- glmer(Diagnosis ~ scaled_pitch_variability + (1|unique_ID), danish_data, family = "binomial")
+
+summary(model)
+
+### PREPROCESS DATA ###
+set.seed(5)
+
+danish_data_subset$Diagnosis <- as.factor(danish_data_subset$Diagnosis)
+
+levels(danish_data_subset$Diagnosis)
+
+#Partition the data
+df_list <- partition(danish_data_subset, p = 0.2, cat_col = c("Diagnosis"), id_col = ("unique_ID"), list_out = T) #p=0.2 takes 20% out to be the test set
+df_test = df_list[[1]]
+df_train = df_list[[2]]
+
+#Make variables factors
+df_train$Diagnosis <- as.factor(df_train$Diagnosis)
+df_train$unique_ID <- as.factor(df_train$unique_ID)
+df_test$Diagnosis <- as.factor(df_test$Diagnosis)
+df_test$unique_ID <- as.factor(df_test$unique_ID)
+
+levels(df_test$Diagnosis)
+
+### MODEL WITH 1 PREDICTOR (scaled_pitch_variability) ###
+#recipe to preprocess the data (center and scale)
+rec <- df_train %>% recipe(Diagnosis ~ .) %>% # defines the outcome
+  step_center(all_numeric()) %>% # center numeric predictors
+  step_scale(all_numeric()) %>% # scales numeric predictors
+  step_corr(all_numeric()) %>% 
+  #check_missing(everything()) %>%
+  prep(training = df_train) #executing transformations on the data in the brackets (usually training data)
+
+train_baked <- juice(rec) # extract df_train (finalized training set) from recipe
+rec #inspect rec
+ 
+test_baked <- rec %>% bake(df_test) #applying recipe to test data
+
+#make Diagnosis a factor
+train_baked$Diagnosis <- as.factor(train_baked$Diagnosis)
+test_baked$Diagnosis <- as.factor(test_baked$Diagnosis)
+
+#fit the model with the best predictor
+log_fit <- 
+  logistic_reg() %>%
+  set_mode("classification") %>% 
+  set_engine("glm") %>%
+  fit(Diagnosis ~ scaled_pitch_variability, data = train_baked)
+ 
+#get both of it at once (just additional), get it all in a table
+test_results <- 
+ test_baked %>% 
+  select(Diagnosis) %>% 
+  mutate(
+    log_class = predict(log_fit, new_data = test_baked) %>% 
+      pull(.pred_class),
+    log_prob  = predict(log_fit, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_1)
+  )
+ 
+#examine the first 5 results 
+test_results %>% 
+  head(5) %>% 
+  knitr::kable() 
+ 
+#PERFORMANCE METRICS
+#get accuracy and kappa
+metrics(test_results, truth = Diagnosis, estimate = log_class) %>% 
+  knitr::kable()
+#accuracy: percent of agreement 
+#kappa: agreement, corrected for just "by change"
+ 
+model_simple <- glm(Diagnosis ~ scaled_pitch_variability, data = danish_data_subset, family = "binomial")
+
+#Now we create a confusion matrix
+predicted_values <- predict(model_simple, test_baked, allow.new.levels = T)
+pred_df <- data_frame(predictions = predicted_values, actual = test_baked$Diagnosis)
+pred_df$predictions = ifelse(pred_df$predictions < 0.0, 1, 2)
+pred_df$predictions <- as_factor(pred_df$predictions)
+
+caret::confusionMatrix(pred_df$predictions, pred_df$actual, positive ="2")
+
+
+
+#roc curve
+test_results %>%
+  roc_curve(truth = Diagnosis, log_prob) %>% 
+  autoplot()
+#best model if it would go straight up and then to the right, the dottet line is the worst 
+ 
+#gain curve
+test_results %>% 
+  mutate(log_prob = 1 - log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
+  gain_curve(truth = Diagnosis, log_prob) %>% 
+  autoplot()
+#bottom of grey: just chance, top of grey: if it caputred everything in the data, line: where our model actually is 
+
+
+### USE CVMS FROM TORTURIAL ###
+# Attach packages
+pacman::p_load(cvms, tidymodels, randomForest)
+
+# Prepare data
+dat <- groupdata2::fold(train_baked, k = 10,
+                                     cat_col = 'Diagnosis',
+                                     id_col = 'unique_ID')
+dat[["Diagnosis"]] <- factor(dat[["Diagnosis"]])
+
+
+##Create model function (log_reg) that takes train_data and fits a model object
+log_model_fn <- function(train_data, formula){
+    logistic_reg() %>%  
+    set_mode(mode = "classification") %>% 
+    set_engine("glm") %>%
+    fit(formula, data = train_data)
+  }
+
+
+# Create a model function (random forest in this case)
+# that takes train_data and formula as arguments
+# and returns the fitted model object
+rf_model_fn <- function(train_data, formula){
+    rand_forest(trees = 100, mode = "classification") %>%
+      set_engine("randomForest") %>%
+      fit(formula, data = train_data)
+  }
+
+
+# Create a predict function
+# Usually just wraps stats::predict
+# Takes test_data, model and formula arguments
+# and returns vector with probabilities of class 1
+# (this depends on the type of task, gaussian, binomial or multinomial)
+rf_predict_fn <- function(test_data, model, formula){
+    stats::predict(object = model, new_data = test_data, type = "prob")[[2]]
+  }
+
+# Now cross-validation
+# Note the different argument names from cross_validate()
+CV_log <- cross_validate_fn(
+  dat,
+  model_fn = log_model_fn,
+  formulas = c("Diagnosis ~ scaled_speech_rate", "Diagnosis ~ scaled_pitch_variability", "Diagnosis ~ scaled_proportion_spoken_time", "Diagnosis ~ scaled_speech_rate + scaled_pitch_variability", "Diagnosis ~ scaled_speech_rate + scaled_proportion_spoken_time", "Diagnosis ~ scaled_speech_rate + scaled_pitch_variability + scaled_proportion_spoken_time"),
+  fold_cols = '.folds',
+  type = 'binomial',
+  predict_fn = rf_predict_fn
+)
+#cross validate random forest
+CV_rf <- cross_validate_fn(
+  dat,
+  model_fn = rf_model_fn,
+  formulas = c("Diagnosis ~ scaled_speech_rate", "Diagnosis ~ scaled_pitch_variability", "Diagnosis ~ scaled_proportion_spoken_time", "Diagnosis ~ scaled_speech_rate + scaled_pitch_variability", "Diagnosis ~ scaled_speech_rate + scaled_proportion_spoken_time", "Diagnosis ~ scaled_speech_rate + scaled_pitch_variability + scaled_proportion_spoken_time"),
+  fold_cols = '.folds',
+  type = 'binomial',
+  predict_fn = rf_predict_fn
+)
+
+#inspect data
+CV_log %>% 
+  select(1:6) %>% #select only the first 6 cols
+  head(15) %>% #select only the first two rows
+  knitr::kable()
+#inspect random forest
+CV_rf %>% 
+  select(1:6) %>% #select only the first 6 cols
+  head(15) %>% #select only the first two rows
+  knitr::kable()
+
+### TEST BEST MODEL ON TEST DATA ###
+
+#From the cross-validation above, we found that the best model with an accuracy of 0.55 was Diagnosis predicted from speech rate and proportion of spoken time
+
+#logistic regression
+log_fit1 <- 
+  logistic_reg() %>%
+  set_mode("classification") %>% 
+  set_engine("glm") %>%
+  fit(Diagnosis ~ scaled_speech_rate + scaled_proportion_spoken_time, data = train_baked)
+
+#predict class and probability at the same time
+test_results1 <- 
+  test_baked %>% 
+  select(Diagnosis) %>% 
+  mutate(
+    log_class = predict(log_fit1, new_data = test_baked) %>% 
+      pull(.pred_class),
+    log_prob  = predict(log_fit1, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_1)
+   
+  )
+
+test_results1 %>% 
+  head(5) %>% 
+  knitr::kable() #examine the first 5
+
+#performance metrics
+metrics(test_results1, truth = Diagnosis, estimate = log_class) %>% 
+  knitr::kable() #kappa is how much the model predicts when you take out the chance (0.5)
+
+#plotting the roc curve:
+test_results1 %>%
+  roc_curve(truth = Diagnosis, log_prob) %>% 
+  autoplot() #a perfect plot would go all the way up in the very beginning and then go horisontally
+
+#gain curve
+test_results1 %>% 
+  mutate(log_prob = 1 - log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
+  gain_curve(truth = Diagnosis, log_prob) %>% 
+  autoplot() #the bottom of the grey area is what the line would look like if it only predicted by chance
+             #the top of the grey area is what the curve would look like if the model predicted all the values correctly
+
+
+```
+
+
