@@ -1,0 +1,398 @@
+---
+title: "Assignment 3 - Part 2 - Diagnosing Schizophrenia from Voice"
+author: "Sofie Ditmer"
+date: "October 17, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(effsize)
+library(lme4)
+library(dplyr)
+library(pacman)
+pacman::p_load("tidymodels", "groupdata2", "caret", "e1071", "ROCit", "kernlab", "cvms")
+
+```
+
+## Assignment 3 - Part 2 - Diagnosing schizophrenia from voice
+
+In the previous part of the assignment you generated a bunch of "features", that is, of quantitative descriptors of voice in schizophrenia. We then looked at whether we could replicate results from the previous literature.
+We now want to know whether we can automatically diagnose schizophrenia from voice only, that is, relying on the set of features you produced last time, we will try to produce an automated classifier.
+Again, remember that the dataset containst 7 studies and 3 languages. Feel free to only include Danish (Study 1-4) if you feel that adds too much complexity.
+
+Issues to be discussed your report:
+- Should you run the analysis on all languages/studies at the same time? 
+- Choose your best acoustic feature from part 1. How well can you diagnose schizophrenia just using it?
+- Identify the best combination of acoustic features to diagnose schizophrenia using logistic regression.
+- Discuss the "classification" process: which methods are you using? Which confounds should you be aware of? What are the strength and limitation of the analysis?
+- Bonus question: Logistic regression is only one of many classification algorithms. Try using others and compare performance. Some examples: Discriminant Function, Random Forest, Support Vector Machine, etc. The package caret provides them. 
+- Bonus Bonus question: It is possible combine the output of multiple  classification models to improve classification accuracy. For inspiration see,
+https://machinelearningmastery.com/machine-learning-ensembles-with-r/
+ The interested reader might also want to look up 'The BigChaos Solution to the Netflix Grand Prize'
+
+## Learning objectives
+- Learn the basics of classification in a machine learning framework
+- Design, fit and report logistic regressions
+- Apply feature selection techniques
+
+### Let's start
+
+We first want to build a logistic regression to see whether you can diagnose schizophrenia from your best acoustic feature. Let's use the full dataset and calculate the different performance measures (accuracy, sensitivity, specificity, PPV, NPV, ROC curve). You need to think carefully as to how we should (or not) use study and subject ID.
+
+Then cross-validate the logistic regression and re-calculate performance on the testing folds. N.B. The cross-validation functions you already have should be tweaked: you need to calculate these new performance measures. Alternatively, the groupdata2 and cvms package created by Ludvig are an easy solution. 
+
+N.B. the predict() function generates log odds (the full scale between minus and plus infinity). Log odds > 0 indicates a choice of 1, below a choice of 0.
+N.N.B. you need to decide whether calculate performance on each single test fold or save all the prediction for test folds in one datase, so to calculate overall performance.
+N.N.N.B. Now you have two levels of structure: subject and study. Should this impact your cross-validation?
+N.N.N.N.B. A more advanced solution could rely on the tidymodels set of packages (warning: Time-consuming to learn as the documentation is sparse, but totally worth it)
+
+```{r}
+#First we read our data from the preivous assignment (part 1)
+acoustic_data <- read.csv("acoustic_features.csv")
+
+#We do not want to run the analysis on all langauges. We only want the Danish data. We use the filter() function to filter away all other languages other than Danish
+
+danish_data <- filter(acoustic_data, Language == "Danish")
+
+#Our best model is model number 1, because its hedge's g is most similar to the hedge's g that the meta-analysis found
+
+#Model 1: g = -0.125, g from meta-analysis = -0.55
+#Model 2: g  = 0.003, g from meta-analysis = -1.26
+#Model 3: g = -0.135, g from meta-analysis = -0.75
+#Model 4: g = 0.183, g from meta-analysis = 1.89
+
+#Here we can see that model 1 performs most similarly to the meta-analysis. Model one uses the feature pitch variability
+
+#Now we need to find out how well we can diagnose schizophrenia just using this feature - pitch variability.
+#Predicting diagnosis from pitch variability using logistic regression:
+
+danish_data$Diagnosis <- as.factor(danish_data$Diagnosis)
+
+#Now we train the model (running the model is called training)
+model_diagnosis_pitch_variability <- glmer(Diagnosis ~ scaled_pitch_variability + (1|unique_ID), data = danish_data, family = binomial)
+
+summary(model_diagnosis_pitch_variability)
+
+#From the summary we can see that when it goes from baseline (control) to schizophrenic the pitch varibiality decreases, but not significantly (p > 0.05), which means that we cannot predict schizophrenia very well just from using this feature only. 
+
+#Let's look at a confusion matrix that shows how many type I and type II errors our model makes.
+#First we get the predicted values
+predicted_values <- predict(model_diagnosis_pitch_variability, danish_data, allow.new.levels = TRUE)
+
+#The predict function spits out log odds out. The threshold of log odds lies at 50 - thus a 50 percent likelihood of control or schizophrenic. 
+
+#Now we make a data frame containing these predicted values
+pred_df <- data_frame(predictions = predicted_values, actual = danish_data$Diagnosis)
+
+pred_df$predictions <- ifelse(pred_df$predictions < 0.0, 1, 2)
+
+pred_df$predictions <- as.factor(pred_df$predictions)
+
+#Now we can make a confusion matrix using caret-package
+caret::confusionMatrix(pred_df$predictions, pred_df$actual, positive = "1")
+
+#We can see from the confusion matrix that our model is 100% accurate in all its predictions (accuracy = 1 and Kappa = 1). This is because when we train the model (run the model on the data) our random intercept includes the unique IDs, which is basically giving the answers to the model, which is why it is able to be accurate in all its predictions.
+
+#How do we fix the fact that our model is able to predict with an accuracy of 100 every time?
+#Answer: We can either not use unique IDs at all, or we can convert the unique IDs before we apply the model on the test data by adding 1000 to all unique IDs or change the name of the unique IDs, which would mean that the model cannot use the unique IDs to predict diagnosis, which is basically cheating - giving the model the answers to predict.
+
+#We choose to change the name of the unique IDs in order to stop the model from being 100% accurate
+#First we create a new data frame containing the data
+
+danish_data_copy <- danish_data
+
+#Now we use the paste function to give the unique IDs a name that is the participant, the study, the daignosis and then we add the gender, which means that the model can no longer use the unique IDs in its predictions and thus not be 100% accurate in its predictions.
+
+danish_data_copy$unique_ID <- paste(danish_data_copy$Participant, danish_data_copy$Study, danish_data_copy$Diagnosis, danish_data_copy$Gender, sep = "_")
+
+#We change the unique ID to a factor
+danish_data_copy$unique_ID <- as.factor(danish_data_copy$unique_ID)
+
+#Now that we have changed the name of the unique IDs we can make the new predictions, and change the data in the predict() function to the new data containing the new unique IDs
+predicted_values <- predict(model_diagnosis_pitch_variability, danish_data_copy, allow.new.levels = TRUE)
+
+pred_df <- data_frame(predictions = predicted_values, actual = danish_data$Diagnosis)
+
+pred_df$predictions <- ifelse(pred_df$predictions < 0.0, 1, 2)
+
+pred_df$predictions <- as.factor(pred_df$predictions)
+
+#Now we can make the confusion matrix once again
+caret::confusionMatrix(pred_df$predictions, pred_df$actual, positive = "1")
+
+#Now we can see that our model performs a lot worse in its predictions. Now our model's accuracy is only 0.52 which means that it is fifty-fifty, which is very bad. Our model predicts 
+
+#Now we need to make a ROC curve, which is a curve that gives us the optimal relation between specificity and sensititivty
+pred_df$predictions <- as.numeric(pred_df$predictions)
+
+pred_df$actual <- as.numeric(pred_df$actual)
+
+ROCit_obj <- rocit(score=pred_df$predictions,class=pred_df$actual)
+
+plot(ROCit_obj)
+
+#From this ROC curve we can conclude that our model is too sensitive and has a very low specificity. This is very bad. This also shows us that our model cannot predict diagnosis only from pitch variability. This also explains why our model has predicted all of the participants to be healthy controls - it is too sensitive to the "positive class" which is controls. 
+
+#Houston we have a problem: the column unique ID cotains many rows for the same participant, but R treats them as separate IDs even though multiple rows are the same participant - we need to fix this!
+
+```
+
+Now we cross-validate using Tidymodels (see Kenneth's toturial)
+```{r}
+#First, we remove language because it is a factor with only 1 level, which will be a problem later
+drops <- c("Language") #drops language column
+danish_data <- danish_data[ , !(names(danish_data) %in% drops)] #removes all the column names from drops
+
+#First we partion the data
+set.seed(5)
+df_list <- partition(danish_data, p = 0.2, cat_col = c("Diagnosis"), id_col = "unique_ID", list_out = T)
+df_test = df_list[[1]]
+df_train = df_list[[2]]
+
+#Now we need to create a recipe (rec)
+rec <- danish_data %>% recipe(Diagnosis ~ scaled_pitch_variability + scaled_proportion_spoken_time + scaled_speech_rate) %>% # defines the outcome
+  step_center(all_numeric()) %>% # center numeric predictors
+  step_scale(all_numeric()) %>% # scales numeric predictors
+  step_corr(all_numeric()) %>% 
+  prep(training = df_train)
+
+train_baked <- juice(rec) # extract df_train from rec
+
+rec
+
+#Now we apply the recipe to test
+test_baked <- rec %>% bake(df_test)
+
+#logistic regression
+ log_fit <-
+   logistic_reg() %>%
+   set_mode("classification") %>%
+   set_engine("glm") %>%
+   fit(Diagnosis ~ ., data = train_baked)
+
+#support vector machine
+ svm_fit <-
+   svm_rbf() %>%
+   set_mode("classification") %>%
+   set_engine("kernlab") %>%
+   fit(Diagnosis ~ ., data = train_baked)
+ 
+#predict class
+log_class <- log_fit %>%
+  predict(new_data = test_baked)
+
+#get prob of class
+log_prop <- log_fit %>%
+  predict(new_data = test_baked, type = "prob") %>%
+  pull(.pred_2)
+
+#get multiple at once
+test_results <- test_baked %>% 
+select(Diagnosis) %>% 
+mutate(
+log_class = predict(log_fit, new_data = test_baked) %>% 
+pull(.pred_class),
+log_prob  = predict(log_fit, new_data = test_baked, type = "prob") %>% 
+pull(.pred_2),
+svm_class = predict(svm_fit, new_data = test_baked) %>% 
+pull(.pred_class),
+svm_prob = predict(svm_fit, new_data = test_baked, type = "prob") %>% 
+pull(.pred_2)
+)
+
+test_results %>% 
+head(5) %>% 
+knitr::kable() #examine the first 5
+
+#Performance metrices
+metrics(test_results, truth = Diagnosis, estimate = log_class) %>% 
+knitr::kable()
+
+metrics(test_results, truth = Diagnosis, estimate = svm_class) %>% 
+knitr::kable()
+
+#plotting the roc curve:
+test_results %>%
+roc_curve(truth = Diagnosis, log_prob) %>% 
+autoplot()
+
+test_results %>% 
+mutate(log_prob = 1 - log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
+gain_curve(truth = Diagnosis, log_prob) %>% 
+autoplot()
+
+#First we use the function to create 10 folds, 10 times
+cv_folds <- vfold_cv(danish_data, v = 10, repeats = 10, group = unique_ID, strata = Diagnosis)
+
+#Now we prepare data set and fetch train data
+cv_folds <- cv_folds %>% 
+mutate(recipes = splits %>%
+# prepper is a wrapper for `prep()` which handles `split` objects
+map(prepper, recipe = rec),
+train_data = splits %>% map(training))
+
+# train model of each fold
+  # create a non-fitted model
+log_fit <- 
+logistic_reg() %>%
+set_mode("classification") %>% 
+set_engine("glm") 
+
+
+cv_folds <- cv_folds %>%  mutate(
+  log_fits = pmap(list(recipes, train_data), #input 
+                            ~ fit(log_fit, formula(.x), data = bake(object = .x, new_data = .y)) #function to apply
+                 ))
+
+#Note how the dataframe looks. Take some time to understand it and note especially that cells contains entire datasets and their respective recipes and models.
+
+```
+
+```{r}
+#Now it gets slightly more complicated, we create a function which takens in a split (fold) from the above cross validation and applies a recipe and a model to it. Returns a tibble containing the actual and predicted results. We then apply it to the dataset.
+
+#First we need to make our model
+model <- glmer(Diagnosis ~ scaled_pitch_variability + (1|unique_ID), data = danish_data, family = binomial)
+
+predict_log <- function(split, rec, model) {
+  # IN
+    # split: a split data
+    # rec: recipe to prepare the data
+    # 
+  # OUT
+    # a tibble of the actual and predicted results
+  baked_test <- bake(rec, testing(split))
+  tibble(
+    actual = baked_test$Diagnosis,
+    predicted = predict(model, new_data = baked_test) %>% pull(.pred_diagnosis),
+    prop_schizophrenic =  predict(model, new_data = baked_test, type = "prob") %>% pull(.pred_schizophrenic),
+    prop_control =  predict(model, new_data = baked_test, type = "prob") %>% pull(`.pred_control`)
+  ) 
+}
+
+# apply our function to each split, which their respective recipes and models (in this case log fits) and save it to a new col
+cv_folds <- cv_folds %>% 
+  mutate(pred = pmap(list(splits, recipes, log_fits) , predict_log))
+
+#Performance metrics
+eval <- 
+  cv_folds %>% 
+  mutate(
+    metrics = pmap(list(pred), ~ metrics(., truth = actual, estimate = predicted, prop_schizophrenic))) %>% 
+  select(id, id2, metrics) %>% 
+  unnest(metrics)
+
+#inspect performance metrics
+eval %>% 
+  select(repeat_n = id, fold_n = id2, metric = .metric, estimate = .estimate) %>% 
+  spread(metric, estimate) %>% 
+  head() %>% 
+  knitr::kable()
+
+```
+```{r}
+#Since the above cross-validation did not work (Tidymodels) we now try Ludvig's package, cvms
+p_load("cvms")
+library(cvms)
+library(groupdata2) # fold() partition()
+library(knitr) # kable()
+library(dplyr) # %>% arrange()
+library(ggplot2)
+
+# Set seed for reproducibility
+set.seed(7)
+
+# Fold data 
+data <- fold(danish_data, k = 4,
+             cat_col = 'Diagnosis',
+             id_col = 'unique_ID') %>% 
+  arrange(.folds)
+
+# Show first 15 rows of data
+data %>% head(15) %>% kable()
+
+#Now we can cross-validate the model
+CV2 <- cross_validate(data, "Diagnosis~scaled_pitch_variability",
+                      fold_cols = '.folds',
+                      family = 'binomial')
+
+#Show results
+CV2
+
+# Results metrics
+CV2 %>% select(1:9) %>% kable()
+
+
+```
+
+Since the above did not work we try this:
+```{r}
+# Attach packages
+pacman::p_load(cvms, tidymodels) 
+
+# Prepare data
+dat <- groupdata2::fold(danish_data, k = 4,
+                                     cat_col = 'Diagnosis',
+                                     id_col = 'unique_ID')
+dat[["Diagnosis"]] <- factor(dat[["Diagnosis"]])
+
+# Create a model function (random forest in this case)
+# that takes train_data and formula as arguments
+# and returns the fitted model object
+rf_model_fn <- function(train_baked, formula){
+    rand_forest(trees = 100, mode = "classification") %>%
+      set_engine("randomForest") %>%
+      fit(formula, data = train_baked)
+  }
+
+#We define our model
+model <- glmer(Diagnosis ~ scaled_pitch_variability + (1|unique_ID), data = danish_data, family = binomial)
+
+# Create a predict function
+# Usually just wraps stats::predict
+# Takes test_data, model and formula arguments
+# and returns vector with probabilities of class 1
+# (this depends on the type of task, gaussian, binomial or multinomial)
+rf_predict_fn <- function(test_baked, model, formula){
+    stats::predict(object = model, new_data = test_baked, type = "prob")[[2]]
+}
+
+# Now cross-validation
+# Note the different argument names from cross_validate()
+CV <- cross_validate_fn(
+  dat,
+  model_fn = rf_model_fn,
+  formulas = c("Diagnosis~scaled_pitch_variability", "Diagnosis~scaled_pitch_variability + scaled_proportion_spoken_time","Diagnosis~scaled_pitch_variability + scaled_proportion_spoken_time + scaled_speech_rate"),
+  fold_cols = '.folds',
+  type = 'binomial',
+  predict_fn = rf_predict_fn
+)
+
+#inspect data
+CV %>% 
+  select(1:6) %>% #select only the first 6 cols
+  head(2) %>% #select only the first two rows
+  knitr::kable()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
