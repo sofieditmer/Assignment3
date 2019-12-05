@@ -44,7 +44,7 @@ N.N.N.N.B. A more advanced solution could rely on the tidymodels set of packages
 
 ```{r}
 library(pacman)
-pacman::p_load(tidyverse, purrr, lme4, lmerTest, DescTools, sjstats, tidymodels, groupdata2)
+pacman::p_load(tidyverse, purrr, lme4, lmerTest, DescTools, sjstats, tidymodels, groupdata2, dplyr)
 p_load("cvms")
 
 #First we read our data from the preivous assignment (part 1)
@@ -160,7 +160,7 @@ test_results %>%
  
 #gain curve
 test_results %>% 
-  mutate(log_prob = 1 - log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
+  mutate(log_prob = log_prob - 1) %>% # for the plot to show correctly (otherwise the line would be flipped)
   gain_curve(truth = Diagnosis, log_prob) %>% 
   autoplot()
 #bottom of grey: just chance, top of grey: if it caputred everything in the data, line: where our model actually is 
@@ -247,7 +247,7 @@ log_fit1 <-
   set_engine("glm") %>%
   fit(Diagnosis ~ scaled_speech_rate + scaled_proportion_spoken_time, data = train_baked)
 
-#predict class and probability at the same time
+#predict class and probability at the same time.
 test_results1 <- 
   test_baked %>% 
   select(Diagnosis) %>% 
@@ -274,7 +274,7 @@ test_results1 %>%
 
 #gain curve
 test_results1 %>% 
-  mutate(log_prob = 1 - log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
+  mutate(log_prob = log_prob) %>% # for the plot to show correctly (otherwise the line would be flipped)
   gain_curve(truth = Diagnosis, log_prob) %>% 
   autoplot() #the bottom of the grey area is what the line would look like if it only predicted by chance
              #the top of the grey area is what the curve would look like if the model predicted all the values correctly

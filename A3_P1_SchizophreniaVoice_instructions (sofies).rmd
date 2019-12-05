@@ -60,7 +60,7 @@ There are three pieces of data:
 - Study: a study identifier (the recordings were collected during 6 different studies with 6 different clinical practitioners in 2 different languages)
 - Language: Danish, Chinese and Japanese
 - Participant: a subject ID
-- Diagnosis: whether the participant has schizophrenia or is a control
+- Diagnosis: whether the participant has schizophrenia or is a control.
 - Gender
 - Education
 - Age
